@@ -7,7 +7,7 @@ import tempfile
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QFileDialog, QProgressBar, QTextEdit, QGroupBox, QSpinBox,
-    QCheckBox, QMessageBox,
+    QCheckBox, QMessageBox, QDialog, QComboBox
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtCore import QUrl, QThread, pyqtSignal, Qt
@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import scipy.signal as sg
+import pyttsx3
 
 N_FFT = 2048  # For plots and LPC
 
@@ -191,8 +192,11 @@ class VoiceConversionApp(QMainWindow):
         self.tts_label = QLabel("TTS Audio: Not selected")
         self.tts_btn = QPushButton("Browse TTS Audio")
         self.tts_btn.clicked.connect(self.load_tts_audio)
+        self.create_tts_btn = QPushButton("Create TTS Audio")
+        self.create_tts_btn.clicked.connect(self.create_tts_audio)
         tts_layout.addWidget(self.tts_label)
         tts_layout.addWidget(self.tts_btn)
+        tts_layout.addWidget(self.create_tts_btn)
         file_layout.addLayout(tts_layout)
         layout.addWidget(file_group)
 
@@ -358,6 +362,27 @@ class VoiceConversionApp(QMainWindow):
         self.log(f"Processing failed: {err}")
         QMessageBox.critical(self, "Error", f"Voice conversion failed:\n{err}")
 
+    def create_tts_audio(self):
+        """Open dialog to create TTS audio from text input"""
+        dialog = TTSDialog(self)
+        result = dialog.exec_()
+        
+        if result == QDialog.Accepted and dialog.tts_path:
+            # Clean up previous temp file if exists
+            if self.temp_tts_path and os.path.exists(self.temp_tts_path):
+                try:
+                    os.remove(self.temp_tts_path)
+                except Exception:
+                    pass
+                    
+            # Set new TTS path
+            self.temp_tts_path = dialog.tts_path
+            self.tts_path = dialog.tts_path
+            self.tts_label.setText("TTS: Generated TTS Audio")
+            self.log("TTS audio generated and loaded")
+            self.play_orig_btn.setEnabled(True)
+            self.check_ready()
+            
     def play_audio(self, mode):
         if mode == "original" and self.tts_path:
             self.player.setMedia(QMediaContent(QUrl.fromLocalFile(self.tts_path)))
@@ -382,6 +407,293 @@ class VoiceConversionApp(QMainWindow):
         event.accept()
 
 
+class TTSDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Text-to-Speech Generator")
+        self.setMinimumSize(600, 400)
+        self.tts_path = None
+        self.engine = None
+        self.setup_ui()
+        self.get_available_voices()
+        
+    def get_available_voices(self):
+        """Get available voices from pyttsx3 and organize by gender"""
+        try:
+            self.engine = pyttsx3.init()
+            voices = self.engine.getProperty('voices')
+            
+            # Clear previous items
+            self.voice_combo.clear()
+            
+            # Organize voices by gender
+            male_voices = []
+            female_voices = []
+            
+            for i, voice in enumerate(voices):
+                name = voice.name
+                # Determine gender based on voice properties
+                is_male = False
+                
+                # Check voice gender property if available
+                if hasattr(voice, 'gender'):
+                    is_male = "male" in str(voice.gender).lower()
+                
+                # Use name as a fallback for determining gender
+                if not is_male:
+                    # Common male voice identifiers
+                    male_indicators = ["david", "mark", "james", "paul", "george", "mike", 
+                                      "male", "man", "boy", "guy", "tom", "sam"]
+                    
+                    # Check if the voice name contains male indicators
+                    name_lower = name.lower()
+                    for indicator in male_indicators:
+                        if indicator in name_lower:
+                            is_male = True
+                            break
+                
+                if is_male:
+                    male_voices.append((i, name))
+                else:
+                    female_voices.append((i, name))
+            
+            # Add voices to combo box with gender categories
+            if male_voices:
+                self.voice_combo.addItem("--- Male Voices ---", None)
+                for idx, (i, name) in enumerate(male_voices):
+                    self.voice_combo.addItem(f"Male: {name}", i)
+            
+            if female_voices:
+                self.voice_combo.addItem("--- Female Voices ---", None)
+                for idx, (i, name) in enumerate(female_voices):
+                    self.voice_combo.addItem(f"Female: {name}", i)
+            
+            # Enable the voice selection if voices were found
+            has_voices = len(male_voices) > 0 or len(female_voices) > 0
+            self.voice_combo.setEnabled(has_voices)
+            self.use_system_voices_radio.setEnabled(has_voices)
+            
+            if not has_voices:
+                self.voice_combo.addItem("No system voices available", None)
+                self.voice_gender_combo.setEnabled(False)
+            else:
+                # Select first valid voice
+                for i in range(1, self.voice_combo.count()):  # Start from 1 to skip headers
+                    if self.voice_combo.itemData(i) is not None:
+                        self.voice_combo.setCurrentIndex(i)
+                        break
+                
+        except Exception as e:
+            self.voice_combo.addItem("Error loading system voices", None)
+            self.voice_combo.setEnabled(False)
+            self.use_system_voices_radio.setEnabled(False)
+            print(f"Error getting voices: {e}")
+        
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        
+        # Text input
+        layout.addWidget(QLabel("Enter text to synthesize:"))
+        self.text_input = QTextEdit()
+        layout.addWidget(self.text_input)
+        
+        # Voice Selection Group
+        voice_group = QGroupBox("Voice Selection")
+        voice_layout = QVBoxLayout(voice_group)
+        
+        # Gender selection
+        gender_layout = QHBoxLayout()
+        gender_layout.addWidget(QLabel("Gender:"))
+        self.voice_gender_combo = QComboBox()
+        self.voice_gender_combo.addItem("Male")
+        self.voice_gender_combo.addItem("Female")
+        self.voice_gender_combo.currentIndexChanged.connect(self.filter_voices_by_gender)
+        gender_layout.addWidget(self.voice_gender_combo)
+        voice_layout.addLayout(gender_layout)
+        
+        # Voice selection
+        voice_selection_layout = QHBoxLayout()
+        voice_selection_layout.addWidget(QLabel("Voice:"))
+        self.voice_combo = QComboBox()
+        voice_selection_layout.addWidget(self.voice_combo)
+        voice_layout.addLayout(voice_selection_layout)
+        
+        # Voice rate (speed)
+        rate_layout = QHBoxLayout()
+        rate_layout.addWidget(QLabel("Speed:"))
+        self.rate_spin = QSpinBox()
+        self.rate_spin.setRange(50, 300)
+        self.rate_spin.setValue(200)
+        self.rate_spin.setSingleStep(10)
+        rate_layout.addWidget(self.rate_spin)
+        voice_layout.addLayout(rate_layout)
+        
+        layout.addWidget(voice_group)
+        
+        # Keep the Google TTS options group for backwards compatibility
+        # but hide it in the UI as we're focusing on system voices
+        self.google_options = QGroupBox("Google TTS Options")
+        google_layout = QHBoxLayout(self.google_options)
+        google_layout.addWidget(QLabel("Language:"))
+        self.lang_combo = QComboBox()
+        languages = {
+            'en': 'English',
+            'es': 'Spanish',
+            'fr': 'French',
+            'de': 'German',
+            'it': 'Italian',
+            'ja': 'Japanese',
+            'ko': 'Korean',
+            'pt': 'Portuguese',
+            'ru': 'Russian',
+            'zh-CN': 'Chinese (Simplified)',
+        }
+        for code, name in languages.items():
+            self.lang_combo.addItem(name, code)
+        google_layout.addWidget(self.lang_combo)
+        self.google_options.setVisible(False)
+        layout.addWidget(self.google_options)
+        
+        # These variables are kept for backwards compatibility
+        self.system_options = voice_group
+        self.use_google_radio = None
+        self.use_system_voices_radio = None
+        
+        # Set initial state
+        self.toggle_tts_options()
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.generate_btn = QPushButton("Generate Speech")
+        self.generate_btn.clicked.connect(self.generate_speech)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        button_layout.addWidget(self.generate_btn)
+        button_layout.addWidget(self.cancel_btn)
+        layout.addLayout(button_layout)
+        
+        # Status label
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_label)
+        
+        self.setLayout(layout)
+    
+    def filter_voices_by_gender(self):
+        """Filter voices by the selected gender"""
+        if not self.engine:
+            return
+            
+        selected_gender = self.voice_gender_combo.currentText()
+        current_index = self.voice_combo.currentIndex()
+        current_data = self.voice_combo.currentData()
+        
+        # Store the current voice selection if possible
+        self.voice_combo.blockSignals(True)
+        self.voice_combo.clear()
+        
+        voices = self.engine.getProperty('voices')
+        male_voices = []
+        female_voices = []
+        
+        for i, voice in enumerate(voices):
+            name = voice.name
+            # Determine gender based on voice properties
+            is_male = False
+            
+            # Check voice gender property if available
+            if hasattr(voice, 'gender'):
+                is_male = "male" in str(voice.gender).lower()
+            
+            # Use name as a fallback for determining gender
+            if not is_male:
+                # Common male voice identifiers
+                male_indicators = ["david", "mark", "james", "paul", "george", "mike", 
+                                  "male", "man", "boy", "guy", "tom", "sam"]
+                
+                # Check if the voice name contains male indicators
+                name_lower = name.lower()
+                for indicator in male_indicators:
+                    if indicator in name_lower:
+                        is_male = True
+                        break
+            
+            if is_male:
+                male_voices.append((i, name))
+            else:
+                female_voices.append((i, name))
+        
+        # Add only the selected gender voices
+        if selected_gender == "Male" and male_voices:
+            for i, name in male_voices:
+                self.voice_combo.addItem(name, i)
+        elif selected_gender == "Female" and female_voices:
+            for i, name in female_voices:
+                self.voice_combo.addItem(name, i)
+        
+        # If no voices for the selected gender, add a message
+        if self.voice_combo.count() == 0:
+            self.voice_combo.addItem(f"No {selected_gender.lower()} voices found", None)
+            self.voice_combo.setEnabled(False)
+        else:
+            self.voice_combo.setEnabled(True)
+            # Try to restore the previous selection if it's still valid
+            if current_data is not None:
+                index = self.voice_combo.findData(current_data)
+                if index >= 0:
+                    self.voice_combo.setCurrentIndex(index)
+        
+        self.voice_combo.blockSignals(False)
+    
+    def generate_speech(self):
+        """Generate TTS from the entered text"""
+        text = self.text_input.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "Empty Text", "Please enter some text to synthesize.")
+            return
+        
+        self.generate_btn.setEnabled(False)
+        self.status_label.setText("Generating speech... Please wait.")
+        
+        try:
+            # Create a temporary WAV file
+            tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            tmp_wav.close()
+            
+            # Use System voices (pyttsx3)
+            if not self.engine:
+                self.engine = pyttsx3.init()
+            
+            # Set voice
+            voice_index = self.voice_combo.currentData()
+            voices = self.engine.getProperty('voices')
+            if voice_index is not None and voices and 0 <= voice_index < len(voices):
+                self.engine.setProperty('voice', voices[voice_index].id)
+                
+                # Set speech rate (default is 200)
+                rate = self.rate_spin.value()
+                self.engine.setProperty('rate', rate)
+                
+                # Generate and save speech
+                self.engine.save_to_file(text, tmp_wav.name)
+                self.engine.runAndWait()
+            else:
+                QMessageBox.warning(self, "Voice Selection", "Please select a valid voice.")
+                self.generate_btn.setEnabled(True)
+                return
+            
+            self.tts_path = tmp_wav.name
+            self.accept()  # Close dialog when done
+            
+        except Exception as e:
+            QMessageBox.critical(self, "TTS Generation Error", str(e))
+            self.status_label.setText("Error generating speech.")
+            
+        finally:
+            self.generate_btn.setEnabled(True)
+
+
 def main():
     app = QApplication(sys.argv)
     try:
@@ -389,11 +701,12 @@ def main():
         import scipy
         import soundfile
         import matplotlib
+        import pyttsx3
     except ImportError as e:
         QMessageBox.critical(
             None,
             "Missing Dependency",
-            f"Missing package: {e}\nPlease install required packages with:\n  pip install librosa scipy soundfile matplotlib",
+            f"Missing package: {e}\nPlease install required packages with:\n  pip install librosa scipy soundfile matplotlib pyttsx3",
         )
         sys.exit(1)
 
