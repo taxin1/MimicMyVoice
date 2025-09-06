@@ -24,21 +24,43 @@ class AudioProcessor(QThread):
             y_tts, _ = librosa.load(self.tts_path, sr=sr)
             self.progress.emit(15)
 
+            # Frame the signals
             frames_ref = librosa.util.frame(y_ref, frame_length=self.frame_length, hop_length=self.hop_length).T
             frames_tts = librosa.util.frame(y_tts, frame_length=self.frame_length, hop_length=self.hop_length).T
-
             n_frames = min(len(frames_ref), len(frames_tts))
-            processed_frames = []
 
+            # --- Pitch contour extraction ---
+            fmin_pitch = librosa.note_to_hz('C2')
+            fmax_pitch = librosa.note_to_hz('C7')
+            f0_ref, _, _ = librosa.pyin(
+                y_ref, fmin=fmin_pitch, fmax=fmax_pitch,
+                frame_length=self.frame_length, hop_length=self.hop_length)
+            f0_tts, _, _ = librosa.pyin(
+                y_tts, fmin=fmin_pitch, fmax=fmax_pitch,
+                frame_length=self.frame_length, hop_length=self.hop_length)
+
+            processed_frames = []
             for i in range(n_frames):
                 frame_r = frames_ref[i] * np.hamming(self.frame_length)
                 frame_t = frames_tts[i] * np.hamming(self.frame_length)
-
                 a_ref = extract_lpc(frame_r, self.lpc_order)
                 a_tts = extract_lpc(frame_t, self.lpc_order)
-
                 residual_ref = lpc_residual(frame_r, a_ref)
                 synth_frame = resynthesize_from_residual(residual_ref, a_tts)
+
+                # --- PITCH MATCHING ---
+                ref_pitch = f0_ref[i] if (i < len(f0_ref) and not np.isnan(f0_ref[i])) else None
+                tts_pitch = f0_tts[i] if (i < len(f0_tts) and not np.isnan(f0_tts[i])) else None
+                if ref_pitch and tts_pitch and tts_pitch > 0:
+                    n_steps = 12 * np.log2(ref_pitch / tts_pitch)
+                    synth_frame = librosa.effects.pitch_shift(synth_frame, sr, n_steps)
+                # else: keep as is if unvoiced
+
+                # --- ENERGY NORMALIZATION ---
+                energy_r = np.sqrt(np.mean(frame_r**2)) + 1e-7
+                energy_synth = np.sqrt(np.mean(synth_frame**2)) + 1e-7
+                if energy_synth > 0:
+                    synth_frame = synth_frame * (energy_r / energy_synth)
 
                 processed_frames.append(synth_frame)
 
@@ -49,6 +71,7 @@ class AudioProcessor(QThread):
             processed_frames = np.array(processed_frames)
             y_out = overlap_add(processed_frames, self.hop_length)
 
+            # Normalize output to avoid clipping
             maxv = np.max(np.abs(y_out))
             if maxv > 0:
                 y_out = y_out / maxv * 0.95
