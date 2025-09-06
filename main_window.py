@@ -120,6 +120,28 @@ class VoiceConversionApp(QMainWindow):
         controls_layout.addWidget(self.progress_bar)
         layout.addLayout(controls_layout)
 
+        # Graph type selection buttons
+        graph_group = QGroupBox("Graph Type")
+        graph_layout = QHBoxLayout(graph_group)
+        
+        self.graph_envelopes_btn = QPushButton("LPC Envelopes")
+        self.graph_envelopes_btn.clicked.connect(lambda: self.switch_graph("envelopes"))
+        self.graph_envelopes_btn.setEnabled(False)
+        self.graph_envelopes_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; }")
+        graph_layout.addWidget(self.graph_envelopes_btn)
+        
+        self.graph_waveforms_btn = QPushButton("Time Domain")
+        self.graph_waveforms_btn.clicked.connect(lambda: self.switch_graph("waveforms"))
+        self.graph_waveforms_btn.setEnabled(False)
+        graph_layout.addWidget(self.graph_waveforms_btn)
+        
+        self.graph_spectrograms_btn = QPushButton("Spectrograms")
+        self.graph_spectrograms_btn.clicked.connect(lambda: self.switch_graph("spectrograms"))
+        self.graph_spectrograms_btn.setEnabled(False)
+        graph_layout.addWidget(self.graph_spectrograms_btn)
+        
+        layout.addWidget(graph_group)
+
         self.plot_canvas = SpectralPlot()
         layout.addWidget(self.plot_canvas)
 
@@ -281,10 +303,21 @@ class VoiceConversionApp(QMainWindow):
         self.log(f"Processing completed. Output saved to: {os.path.basename(output_file)}")
         self.process_btn.setEnabled(True)
         self.play_proc_btn.setEnabled(True)
+        
+        # Enable graph switching buttons
+        self.graph_envelopes_btn.setEnabled(True)
+        self.graph_waveforms_btn.setEnabled(True)
+        self.graph_spectrograms_btn.setEnabled(True)
+        
         try:
             y_ref, sr = librosa.load(self.ref_path, sr=None)
             y_tts, _ = librosa.load(self.tts_path, sr=sr)
             y_proc, _ = librosa.load(self.output_path, sr=sr)
+            
+            # Store audio data in the plot canvas for switching between views
+            self.plot_canvas.store_audio_data(y_ref, y_tts, y_proc, sr)
+            
+            # Calculate and plot LPC envelopes (default view)
             freq_grid = np.linspace(0, sr / 2, N_FFT // 2 + 1)
             w_ref, env_ref = extract_lpc_env(y_ref, sr, self.lpc_spin.value())
             w_tts, env_tts = extract_lpc_env(y_tts, sr, self.lpc_spin.value())
@@ -298,6 +331,28 @@ class VoiceConversionApp(QMainWindow):
             self.plot_canvas.plot_envelopes(freq_grid, env_ref_interp, env_tts_interp, env_proc_interp)
         except Exception as e:
             self.log(f"Plot update failed: {e}")
+
+    def switch_graph(self, graph_type):
+        """Switch between different graph types"""
+        if not hasattr(self, 'output_path') or not self.output_path:
+            return
+            
+        # Update button styles to show current selection
+        buttons = {
+            "envelopes": self.graph_envelopes_btn,
+            "waveforms": self.graph_waveforms_btn, 
+            "spectrograms": self.graph_spectrograms_btn
+        }
+        
+        for btn_type, btn in buttons.items():
+            if btn_type == graph_type:
+                btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; }")
+            else:
+                btn.setStyleSheet("")
+        
+        # Switch the plot type
+        self.plot_canvas.switch_plot_type(graph_type)
+        self.log(f"Switched to {graph_type} view")
 
     def processing_error(self, err):
         self.process_btn.setEnabled(True)
